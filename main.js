@@ -3,20 +3,61 @@ var http = require('http'),
     sqlite3 = require('sqlite3').verbose(),
     fs = require('fs'),
     async = require('async'),
-    path = require('path');
+    path = require('path'),
+    mustache = require('mustache'),
+    _und = require('underscore');
 
-var client_id = fs.readFileSync('CLIENT_ID', 'utf8').trim();
-var dir_name = fs.readFileSync('DIR_NAME', 'utf8').trim();
-var db = new sqlite3.Database(path.join(dir_name, 'favorites.db'));
-var download_interval = 120 * 1000; // Wait between downloading tracks
-var check_interval = 15 * 60 * 1000;
+function read_config(file_name) {
+  if (fs.existsSync(file_name)) {
+    var contents = fs.readFileSync(file_name, 'utf8');
+    var rendered_contents = mustache.render(contents, {});
+    return JSON.parse(rendered_contents.trim());
+  } else {
+    return {};
+  }
+}
+
+function parse_time(str) {
+  var groups = str.match(/(\d+)(.*)/);
+  if (!groups) {
+    throw new Exception('Unparseable time interval: ' + str);
+  }
+
+  num = parseInt(groups[1]);
+  unit = groups[2];
+  if (unit.length > 0) {
+    switch(unit) {
+      case 'min':
+      case 'm':
+        num *= (60 * 1000);
+        break;
+      case 'sec':
+      case 's':
+        num *= 1000;
+        break;
+      case 'hour':
+      case 'hours':
+      case 'h':
+        num *= (60 * 60 * 1000);
+        break;
+      default:
+        throw new Error('Unrecognized time unit: ' + unit);
+    }
+  }
+  return num;
+}
+
+var config = _und.extend(read_config('config.default.json'), read_config('config.json'));
+config['download_interval'] = parse_time(config['download_interval']);
+config['check_interval'] = parse_time(config['check_interval']);
+var db = new sqlite3.Database(path.join(config.dir_name, 'favorites.db'));
 
 function log_error(err) {
   console.error(err.message);
 }
 
 function append_client_id(url) {
-  return url + '?client_id=' + client_id;
+  return url + '?client_id=' + config.client_id;
 }
 
 function retrieve_favorites(callback) {
@@ -87,7 +128,7 @@ function download_new_favorites() {
           var track = to_download.pop();
           console.log('Starting download of ' + track.title);
           var filename = generate_track_filename(track.title);
-          var the_path = path.join(dir_name, filename);
+          var the_path = path.join(config.dir_name, filename);
           console.log('Path: ' + the_path);
           download_song(append_client_id(track.stream_url), the_path,
             function(err) {
@@ -101,8 +142,8 @@ function download_new_favorites() {
                     } else log_error(err);
                   });
                 if (to_download.length > 0) {
-                  console.log('Starting next download in ' + download_interval + 'ms');
-                  setTimeout(download_next_track, download_interval);
+                  console.log('Starting next download in ' + config.download_interval + 'ms');
+                  setTimeout(download_next_track, config.download_interval);
                 } else {
                   console.log('Done downloading new favorites');
                 }
@@ -115,6 +156,6 @@ function download_new_favorites() {
   });
 }
 
-setInterval(download_new_favorites, check_interval);
+setInterval(download_new_favorites, config.check_interval);
 download_new_favorites();
 

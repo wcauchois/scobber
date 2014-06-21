@@ -1,0 +1,15 @@
+{{! Create a file called config.json to override settings in this file }}
+
+{
+{{! Your OAuth token for SoundCloud; scrape this from the web site. }}
+"client_id": "",
+
+{{! The directory to download tracks to; an SQLite database will also be stored here. }}
+"dir_name": "",
+
+{{! How long to wait between downloads. }}
+"download_interval": "120sec",
+
+{{! How long to wait between polling your favorites list. }}
+"check_interval": "15min"
+}

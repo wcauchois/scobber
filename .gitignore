@@ -1,3 +1,2 @@
 *.swp
-dir
-CLIENT_ID
+config.json
