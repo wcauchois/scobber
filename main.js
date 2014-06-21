@@ -5,7 +5,8 @@ var http = require('http'),
     async = require('async'),
     path = require('path'),
     mustache = require('mustache'),
-    _und = require('underscore');
+    _und = require('underscore'),
+    request = require('request');
 
 function read_config(file_name) {
   if (fs.existsSync(file_name)) {
