@@ -6,9 +6,12 @@ var http = require('http'),
     path = require('path'),
     mustache = require('mustache'),
     _und = require('underscore'),
-    request = require('request');
+    request = require('request'),
+    util = require('util');
 
-function read_config(file_name) {
+function read_config(rel_file_name) {
+  // Look relative to the directory the script is in.
+  file_name = path.resolve(__dirname, rel_file_name);
   if (fs.existsSync(file_name)) {
     var contents = fs.readFileSync(file_name, 'utf8');
     var rendered_contents = mustache.render(contents, {});
@@ -48,50 +51,68 @@ function parse_time(str) {
   return num;
 }
 
+function UrlBuilder(base) {
+  this._base = base;
+  this._path = '/';
+  this._params = {};
+}
+
+_und.extend(UrlBuilder.prototype, {
+  path: function(path) {
+    this._path = path;
+    return this;
+  },
+
+  param: function(key, value) {
+    this._params[key] = (this._params[key] || []).concat([value]);
+    return this;
+  },
+
+  result: function() {
+    var qs = querystring.stringify(this._params);
+    return this._base + this._path + (qs.length > 0 ? ('?' + qs) : '');
+  }
+});
+
 var config = _und.extend(read_config('config.default.json'), read_config('config.json'));
 config['download_interval'] = parse_time(config['download_interval']);
 config['check_interval'] = parse_time(config['check_interval']);
 var db = new sqlite3.Database(path.join(config.dir_name, 'favorites.db'));
 
 function log_error(err) {
-  console.error(err.message);
+  util.log('ERROR ' + (_und.isString(err) ? err : err.message));
 }
 
-function append_client_id(url) {
-  return url + '?client_id=' + config.client_id;
+function SoundCloudApi(client_id) {
+  this.client_id = client_id;
 }
 
-function retrieve_favorites(callback) {
-  var base_url = 'http://api.soundcloud.com/users/wcauchois/favorites.json'
-  http.get(append_client_id(base_url) + '&limit=10', function(res) {
-    res.setEncoding('utf8');
-    var data = '';
-    res.on('readable', function() {
-      data += res.read();
-    }).on('end', function() {
-      try {
-        callback(null, JSON.parse(data));
-      } catch(ex) {
-        callback(new Error('retrieve_favorites: Malformed JSON response'));
+_und.extend(SoundCloudApi.prototype, {
+  url_builder: function() {
+    return new UrlBuilder('http://api.soundcloud.com').param('client_id', config.client_id);
+  },
+
+  call_json: function(url, callback) {
+    request({url: url, json: true}, function(error, response, body) {
+      if(error || response.statusCode !== 200) {
+        callback(error ||
+          new Error('Got code ' + response.statusCode + ' calling ' + url));
+      } else {
+        callback(null, body);
       }
     });
-  }).on('error', callback);
-}
+  },
 
-function download_song(authed_stream_url, out_file_name, callback) {
-  http.get(authed_stream_url, function(res) {
-    if ('location' in res.headers && res.statusCode == 302) {
-      console.log('Got redirect, downloading from ' + res.headers['location']);
-      http.get(res.headers['location'], function(res) {
-        var out_file = fs.createWriteStream(out_file_name);
-        res.on('end', function() { callback(null); });
-        res.pipe(out_file);
-      }).on('error', callback);
-    } else {
-      callback(new Error('download_song: Expected redirect'));
-    }
-  }).on('error', callback);
-}
+  retrieve_favorites: function(user_name, callback) {
+    var endpoint_url = this.url_builder()
+      .path('/users/' + user_name + '/favorites.json')
+      .param('limit', '10')
+      .result();
+    this.call_json(endpoint_url, callback);
+  }
+});
+
+var sc_api = new SoundCloudApi(config.client_id);
 
 function is_already_downloaded(track_id, callback) {
   var q = 'select count(*) as c from tracks where track_id=?'
@@ -106,57 +127,92 @@ function generate_track_filename(original_title) {
   return original_title.replace(/[^a-zA-Z0-9]/g, '_').replace(/_{2,}/g, '_') + '.mp3';
 }
 
+function download_and_add(track) {
+  var filename = generate_track_filename(track.title);
+  var the_path = path.join(config.dir_name, filename);
+  util.log('Downloading ' + track.title + ' to ' + filename);
+
+  var authed_stream_url = new UrlBuilder(track.stream_url)
+    .param('client_id', config.client_id)
+    .result();
+
+  request(authed_stream_url, function(error, response) {
+    if (error) {
+      log_error(error);
+    } else if (response.statusCode !== 200) {
+      log_error('Failed to download, code ' + response.statusCode);
+    } else {
+      var q = 'insert into tracks values(?, ?, ?, ?, ?)';
+      db.run(q, track.id, track.title, filename, track.permalink, JSON.stringify(track),
+        function(err) {
+          err && log_error(err);
+        });
+    }
+  }).pipe(fs.createWriteStream(the_path));
+}
+
 function download_new_favorites() {
-  console.log('Retrieving favorites');
-  retrieve_favorites(function(err, tracks) {
+  util.log('Checking for new favorites');
+  sc_api.retrieve_favorites(config.user_name, function(err, tracks) {
     if (!err) {
       var track_ids = tracks.map(function(t) { return t.id; });
       async.map(track_ids, is_already_downloaded, function(err, results) {
         var to_download = [];
-        console.log('Analyzing favorites');
         for (var i = 0; i < tracks.length; i++) {
           var track = tracks[i], already_downloaded = results[i];
-          if (already_downloaded) {
-            console.log('Looks like we already downloaded ' + track.title);
-          } else {
-            console.log('Cool! ' + track.title + ' is new.');
-            to_download.push(track);
-          }
+          !already_downloaded && to_download.push(track);
         }
-        console.log("Let's download " + to_download.length + " tracks");
-        function download_next_track() {
-          if (to_download.length == 0) return;
-          var track = to_download.pop();
-          console.log('Starting download of ' + track.title);
-          var filename = generate_track_filename(track.title);
-          var the_path = path.join(config.dir_name, filename);
-          console.log('Path: ' + the_path);
-          download_song(append_client_id(track.stream_url), the_path,
-            function(err) {
-              if (!err) {
-                console.log('Successfully downloaded ' + track.title);
-                var q = 'insert into tracks values(?, ?, ?, ?, ?)';
-                db.run(q, track.id, track.title, filename, track.permalink, JSON.stringify(track),
-                  function(err) {
-                    if (!err) {
-                      console.log('Added ' + track.title + ' to the DB');
-                    } else log_error(err);
-                  });
-                if (to_download.length > 0) {
-                  console.log('Starting next download in ' + config.download_interval + 'ms');
-                  setTimeout(download_next_track, config.download_interval);
+        util.log('Downloading ' + to_download.length + ' new tracks');
+        async.waterfall(_und.map(to_download, function(track, i) {
+          return function(callback) {
+            download_and_add(track, function(err) {
+              if (err) {
+                callback(err);
+              } else {
+                if (i === to_download.length - 1) {
+                  // Last track, return immediately.
+                  callback();
                 } else {
-                  console.log('Done downloading new favorites');
+                  setTimeout(callback, config.download_interval);
                 }
-              } else log_error(err);
+              }
             });
-        }
-        download_next_track();
+          }
+        }), function(err) {
+          if (err) {
+            log_error(err);
+          } else {
+            util.log('Done downloading.');
+          }
+        });
       });
-    } else log_error(err);
+    } else {
+      log_error(err);
+    }
   });
 }
 
-setInterval(download_new_favorites, config.check_interval);
-download_new_favorites();
+if (require.main === module) {
+  var download_interval = setInterval(download_new_favorites, config.check_interval);
+  download_new_favorites();
+
+  function force_refresh() {
+    clearInterval(download_interval);
+    download_new_favorites();
+    download_interval = setInterval(download_new_favorites, config.check_interval);
+  }
+
+  process.on('SIGHUP', force_refresh);
+
+  if (config.http_listen) {
+    http.createServer(function(req, res) {
+      util.log('HTTP ' + req.method + ' ' + req.url);
+      if (req.method === 'POST') {
+        force_refresh();
+      }
+      res.end();
+    }).listen(config.http_listen, '0.0.0.0');
+    util.log('HTTP server listening on port ' + config.http_listen);
+  }
+}
 
