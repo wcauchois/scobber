@@ -127,7 +127,7 @@ function generate_track_filename(original_title) {
   return original_title.replace(/[^a-zA-Z0-9]/g, '_').replace(/_{2,}/g, '_') + '.mp3';
 }
 
-function download_and_add(track) {
+function download_and_add(track, callback) {
   var filename = generate_track_filename(track.title);
   var the_path = path.join(config.dir_name, filename);
   util.log('Downloading ' + track.title + ' to ' + filename);
@@ -138,15 +138,19 @@ function download_and_add(track) {
 
   request(authed_stream_url, function(error, response) {
     if (error) {
-      log_error(error);
+      callback(error);
     } else if (response.statusCode !== 200) {
-      log_error('Failed to download, code ' + response.statusCode);
+      callback(new Error(
+        'Failed to download, code ' + response.statusCode));
     } else {
       var q = 'insert into tracks values(?, ?, ?, ?, ?)';
-      db.run(q, track.id, track.title, filename, track.permalink, JSON.stringify(track),
-        function(err) {
-          err && log_error(err);
-        });
+      db.run(q,
+        track.id,
+        track.title,
+        filename,
+        track.permalink,
+        JSON.stringify(track),
+        callback);
     }
   }).pipe(fs.createWriteStream(the_path));
 }
@@ -193,11 +197,12 @@ function download_new_favorites() {
 }
 
 if (require.main === module) {
-  var download_interval = setInterval(download_new_favorites, config.check_interval);
-  download_new_favorites();
+  util.log('Starting up');
+
+  var download_interval = null;
 
   function force_refresh() {
-    clearInterval(download_interval);
+    download_interval && clearInterval(download_interval);
     download_new_favorites();
     download_interval = setInterval(download_new_favorites, config.check_interval);
   }
@@ -214,5 +219,7 @@ if (require.main === module) {
     }).listen(config.http_listen, '0.0.0.0');
     util.log('HTTP server listening on port ' + config.http_listen);
   }
+
+  force_refresh();
 }
 
