@@ -1,2 +1,1 @@
-- respond to UNIX signal (or http req?) to trigger manual refresh
-- refactor code to use request
+- fix or remove bootstrap.sh, it's bogus with the new config stuff
