@@ -1,7 +1,4 @@
-var http = require('http'),
-    querystring = require('querystring'),
-    sqlite3 = require('sqlite3').verbose(),
-    fs = require('fs'),
+var fs = require('fs'),
     async = require('async'),
     path = require('path'),
     _und = require('underscore'),
